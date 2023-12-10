@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+ 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import suppress
 from itertools import cycle
@@ -48,7 +50,6 @@ from yarl import URL
 from PyRoxy import GeoIP, Tools
 from PyRoxy.Exceptions import ProxyInvalidHost, ProxyInvalidPort, ProxyParseError
 import string
-
 
 basicConfig(format='[%(asctime)s - %(levelname)s] %(message)s',
             datefmt="%H:%M:%S")
@@ -131,11 +132,7 @@ class ProxyConvert(object):
             if self.country:
                 self.country = self.country["registered_country"]["iso_code"]
         except Exception as e:
-            # print(self.host)
-            # print(self.port)
             pass
-        # print("user:::",  user)
-        # print("password:::",  password)
         self.user = user or None
         self.password = password or None
 
@@ -316,15 +313,11 @@ class Tools:
     @staticmethod
     def send(sock: socket, packet: bytes):
         global BYTES_SEND, REQUESTS_SENT
-        try:
-            sent_bytes = sock.send(packet)
-            if sent_bytes > 0:
-                BYTES_SEND += sent_bytes
-                REQUESTS_SENT += 1
-                return True
-        except Exception as e:
-            print(f"Error send: {e}")
-        return False
+        if not sock.send(packet):
+            return False
+        BYTES_SEND += len(packet)
+        REQUESTS_SENT += 1
+        return True
 
     @staticmethod
     def sendto(sock, packet, target):
@@ -1651,7 +1644,19 @@ def handleProxyList(con, proxy_li, proxy_ty, url=None):
                 stringBuilder += (proxy.__str__() + "\n")
             wr.write(stringBuilder)
 
-    proxies = ProxyUtiles.readFromFile(proxy_li)
+    proxies = set()
+    with open(proxy_li, 'r') as file:
+        lines = file.readlines()
+        for line in lines:
+            proxy_data = line.strip()
+            parts = proxy_data.split('@')
+            if len(parts) == 2:
+                username_password, host_port = parts
+                username, password = username_password.split(':')[-2:]
+                host, port = host_port.split(':')
+                proxy = ProxyConvert(host, int(port), ProxyType.SOCKS5, username.replace("//", ""), password)
+                proxies.add(proxy)
+
     if proxies:
         logger.info(f"{bcolors.WARNING}Proxy Count: {bcolors.OKBLUE}{len(proxies):,}{bcolors.RESET}")
     else:
