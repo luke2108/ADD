@@ -316,16 +316,11 @@ class Tools:
     @staticmethod
     def send(sock: socket, packet: bytes):
         global BYTES_SEND, REQUESTS_SENT
-        try:
-            sent_bytes = sock.send(packet)
-            if sent_bytes > 0:
-                BYTES_SEND += sent_bytes
-                REQUESTS_SENT += 1
-                # print("Send success")
-                return True
-        except Exception as e:
-            print(f"Error send: {e}")
-        return False
+        if not sock.send(packet):
+            return False
+        BYTES_SEND += len(packet)
+        REQUESTS_SENT += 1
+        return True
 
     @staticmethod
     def sendto(sock, packet, target):
