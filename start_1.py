@@ -243,6 +243,9 @@ class Methods:
 
     ALL_METHODS: Set[str] = {*LAYER4_METHODS, *LAYER7_METHODS}
 
+def random_string(length):
+    letters = string.ascii_lowercase
+    return ''.join(randchoice(letters) for _ in range(length))
 
 google_agents = [
     "Mozila/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
